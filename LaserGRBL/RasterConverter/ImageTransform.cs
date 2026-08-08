@@ -66,15 +66,44 @@ namespace LaserGRBL.RasterConverter
 			{
 				g.Clear(Color.White); //Threshold is the final transformation 
 				g.DrawImage(img, 0, 0); //so clear any transparent color and apply threshold
-
-				// Create an ImageAttributes object, and set its color threshold.
-				ImageAttributes imageAttr = new ImageAttributes();
-				imageAttr.SetThreshold(threshold);
-
-				if (apply)
-					g.DrawImage(bmp, new Rectangle(0, 0, bmp.Width, bmp.Height), 0, 0, bmp.Width, bmp.Height, GraphicsUnit.Pixel, imageAttr);
 			}
+
+			//NOTE: this used to rely on ImageAttributes.SetThreshold (GdipSetImageAttributesThreshold).
+			//That call is unimplemented/unstable on several Wine gdiplus builds (builtin: "not implemented"
+			//fixme and no-op; some native/builtin combinations: infinite hang or region.c assert crash),
+			//which made the raster import dialog hang forever on Line2Line/Vectorize/Centerline under Wine
+			//(they all funnel through this method), while Dithering/Passthrough - which never call it -
+			//worked fine. Reimplemented as a manual per-pixel threshold via LockBits so it no longer
+			//touches that GDI+ codepath at all. Behavior matches GDI+ SetThreshold: each of the R,G,B
+			//channels is independently snapped to 0 or 255 depending on whether it's below/above
+			//(threshold * 255); alpha is left untouched.
+			if (apply)
+				ApplyThresholdInPlace(bmp, threshold);
+
 			return bmp;
+		}
+
+		private static void ApplyThresholdInPlace(Bitmap bmp, float threshold)
+		{
+			byte cut = (byte)Math.Max(0, Math.Min(255, (int)Math.Round(threshold * 255f)));
+
+			Rectangle rc = new Rectangle(0, 0, bmp.Width, bmp.Height);
+			BitmapData data = bmp.LockBits(rc, ImageLockMode.ReadWrite, PixelFormat.Format32bppArgb);
+
+			byte[] buffer = new byte[data.Stride * data.Height];
+			Marshal.Copy(data.Scan0, buffer, 0, buffer.Length);
+
+			for (int k = 0; k < buffer.Length; k += 4)
+			{
+				//buffer layout is B,G,R,A
+				buffer[k] = buffer[k] >= cut ? (byte)255 : (byte)0;         //B
+				buffer[k + 1] = buffer[k + 1] >= cut ? (byte)255 : (byte)0; //G
+				buffer[k + 2] = buffer[k + 2] >= cut ? (byte)255 : (byte)0; //R
+				//alpha (buffer[k + 3]) intentionally left untouched, matching GDI+ SetThreshold
+			}
+
+			Marshal.Copy(buffer, 0, data.Scan0, buffer.Length);
+			bmp.UnlockBits(data);
 		}
 
 		private static Bitmap draw_adjusted_image(Image img, ColorMatrix cm)
